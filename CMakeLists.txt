@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.24)
 project(avela_skin_toolbox C CXX ASM)
 
 # The toolbox's version: X.Y.Z on a release, X.Y.Z-dev on devel between releases (cicd/release.sh sets it).
-set(TOOLBOX_VERSION "1.0.0")
+set(TOOLBOX_VERSION "1.0.1-dev")
 
 # The skin API versions the scenes (src/scenes.cpp) are written for: a pip-style specifier like the firmware's
 # supported_skin_api_versions. Raise it with the scenes when the firmware's skin API changes.
