@@ -1,0 +1,120 @@
+"""Evaluate a skin's Kconfig together with the components it builds on, the way a firmware build would.
+
+Writes into --out-dir:
+- sdkconfig.h      the CONFIG_* defines the skin's (and the components') headers read, ESP-IDF format;
+- sdkconfig.cmake  the same values as CMake variables, for the skin's CMakeLists.txt (if(CONFIG_...));
+- skin.cmake       SKIN_COMPONENT, SKIN_API_VERSION, SKIN_TITLE (the skin's entry in the "Skin" choice).
+
+The Kconfig tree is every <components>/<name>/Kconfig (except other skins: avela_skin_*) plus the skin's own Kconfig.
+The skin's entry in the AVELA_SKIN choice is selected and every optional component is turned on: its switch is
+named after it (avela_weather -> AVELA_WEATHER, a bool). --screen
+overrides the screen the board would give (AVELA_SCREEN_NAME and its AVELA_SCREEN_<NAME> flag).
+"""
+
+import argparse
+import sys
+from pathlib import Path
+
+import kconfiglib
+
+
+def kconfig_files(components_directory, skin_directory):
+    files = []
+    for component in sorted(Path(components_directory).iterdir()):
+        if component.name.startswith("avela_skin_") or component.resolve() == skin_directory.resolve():
+            continue
+        for name in ("Kconfig", "Kconfig.projbuild"):
+            if (component / name).is_file():
+                files.append(component / name)
+    files.append(skin_directory / "Kconfig")
+    return files
+
+
+def skin_entry(configuration, skin_kconfig):
+    choice = next((choice for choice in configuration.choices if choice.name == "AVELA_SKIN"), None)
+    if choice is None:
+        sys.exit("configure_skin: no AVELA_SKIN choice; is avela_ui in the components folder?")
+    entries = [symbol for symbol in choice.syms
+               if any(Path(node.filename).resolve() == skin_kconfig.resolve() for node in symbol.nodes)]
+    if len(entries) != 1:
+        sys.exit(f"configure_skin: {skin_kconfig} must add exactly one entry to the AVELA_SKIN choice "
+                 f"(found {len(entries)})")
+    return entries[0]
+
+
+def config_values(configuration):
+    values = {}
+    for symbol in configuration.unique_defined_syms:
+        if symbol.type in (kconfiglib.BOOL, kconfiglib.TRISTATE):
+            if symbol.str_value == "y":
+                values[symbol.name] = "y"
+        elif symbol.type in (kconfiglib.STRING, kconfiglib.INT, kconfiglib.HEX) and symbol.str_value != "":
+            values[symbol.name] = symbol.str_value
+    return values
+
+
+def define(name, value, symbol_type):
+    if value == "y":
+        return f"#define CONFIG_{name} 1"
+    if symbol_type == kconfiglib.STRING:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'#define CONFIG_{name} "{escaped}"'
+    return f"#define CONFIG_{name} {value}"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--skin", required=True, type=Path)
+    parser.add_argument("--components", required=True, type=Path)
+    parser.add_argument("--out-dir", required=True, type=Path)
+    parser.add_argument("--screen", help="e.g. landscape_320x170 (default: the board's, from avela_boards)")
+    arguments = parser.parse_args()
+
+    skin_kconfig = arguments.skin / "Kconfig"
+    if not skin_kconfig.is_file():
+        sys.exit(f"configure_skin: {skin_kconfig} not found")
+    arguments.out_dir.mkdir(parents=True, exist_ok=True)
+    root = arguments.out_dir / "Kconfig.toolbox"
+    root.write_text('mainmenu "Avela skin toolbox"\n' + "".join(
+        f'source "{path.resolve()}"\n' for path in kconfig_files(arguments.components, arguments.skin)))
+
+    configuration = kconfiglib.Kconfig(str(root), warn=False)
+    entry = skin_entry(configuration, skin_kconfig)
+    entry.set_value(2)
+    component_switches = {path.name.upper() for path in arguments.components.iterdir() if path.is_dir()}
+    for symbol in configuration.unique_defined_syms:
+        if symbol.name in component_switches and symbol.type == kconfiglib.BOOL:
+            symbol.set_value(2)
+
+    values = config_values(configuration)
+    types = {symbol.name: symbol.type for symbol in configuration.unique_defined_syms}
+    if arguments.screen:
+        for name in [name for name in values if name.startswith("AVELA_SCREEN_")]:
+            del values[name]
+        values["AVELA_SCREEN_NAME"] = arguments.screen
+        values[f"AVELA_SCREEN_{arguments.screen.upper()}"] = "y"
+        types["AVELA_SCREEN_NAME"] = kconfiglib.STRING
+    if "AVELA_SCREEN_NAME" not in values:
+        sys.exit("configure_skin: no screen; give --screen (the components folder has no board that sets one)")
+    for required in ("AVELA_SKIN_COMPONENT", "AVELA_SKIN_API_VERSION"):
+        if required not in values:
+            sys.exit(f"configure_skin: the skin's Kconfig sets no {required} for {entry.name}")
+
+    (arguments.out_dir / "sdkconfig.h").write_text(
+        "// Generated by avela_skin_toolbox/tools/configure_skin.py -- do not edit.\n#pragma once\n\n" +
+        "".join(define(name, value, types.get(name)) + "\n" for name, value in sorted(values.items())))
+    (arguments.out_dir / "sdkconfig.cmake").write_text(
+        "# Generated by avela_skin_toolbox/tools/configure_skin.py -- do not edit.\n" +
+        "".join(f'set(CONFIG_{name} "{value}")\n' for name, value in sorted(values.items())))
+    title = entry.nodes[0].prompt[0] if entry.nodes[0].prompt else entry.name
+    (arguments.out_dir / "skin.cmake").write_text(
+        "# Generated by avela_skin_toolbox/tools/configure_skin.py -- do not edit.\n"
+        f'set(SKIN_COMPONENT "{values["AVELA_SKIN_COMPONENT"]}")\n'
+        f'set(SKIN_API_VERSION "{values["AVELA_SKIN_API_VERSION"]}")\n'
+        f'set(SKIN_TITLE "{title}")\n')
+    print(f'{values["AVELA_SKIN_COMPONENT"]} ("{title}"), skin API {values["AVELA_SKIN_API_VERSION"]}, '
+          f'screen {values["AVELA_SCREEN_NAME"]}')
+
+
+if __name__ == "__main__":
+    main()

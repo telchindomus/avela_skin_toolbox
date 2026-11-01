@@ -1,0 +1,6 @@
+build/
+.venv/
+.env
+renders/
+render.log
+cicd/.env
